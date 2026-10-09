@@ -1,5 +1,5 @@
 
-name: Build Super Bomberman 5
+name: Construir Super Bomberman 5
 
 on:
   workflow_dispatch:
@@ -12,38 +12,76 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout private repository
+      - name: Fazer checkout do repositorio com o payload
         uses: actions/checkout@v4
 
-      - name: Download Ludere source
+      - name: Baixar meu fork do Ludere
         run: |
           git clone --depth 1 \
-            https://github.com/tytydraco/Ludere.git ludere
+            https://github.com/JosueRess/Ludere.git ludere
 
-      - name: Prepare game payload
-        run: |
-          mkdir -p ludere/autogen/input
-          cp SuperBomberman5_Autogen_Payload.zip \
-            ludere/autogen/input/payload.zip
-          unzip ludere/autogen/input/payload.zip \
-            -d ludere/autogen/input/
-          rm ludere/autogen/input/payload.zip
-
-      - name: Install dependencies
+      - name: Instalar dependencias
         run: |
           sudo apt-get update
-          sudo apt-get install -y xmlstarlet
+          sudo apt-get install -y xmlstarlet imagemagick
 
-      - name: Generate game APK
+      - name: Aplicar icon.png ao aplicativo
+        run: |
+          RES="ludere/app/src/main/res"
+          ICON="$RES/mipmap-xxxhdpi/icon.png"
+
+          if [ ! -f "$ICON" ]; then
+            echo "ERRO: icon.png nao encontrado em $ICON"
+            exit 1
+          fi
+
+          for item in \
+            "mipmap-mdpi 48" \
+            "mipmap-hdpi 72" \
+            "mipmap-xhdpi 96" \
+            "mipmap-xxhdpi 144" \
+            "mipmap-xxxhdpi 192"
+          do
+            set -- $item
+            DIR="$RES/$1"
+            SIZE="$2"
+
+            if [ ! -d "$DIR" ]; then
+              echo "ERRO: pasta nao encontrada: $DIR"
+              exit 1
+            fi
+
+            convert "$ICON" -resize "${SIZE}x${SIZE}!" \
+              "$DIR/ic_launcher.png"
+
+            convert "$ICON" -resize "${SIZE}x${SIZE}!" \
+              "$DIR/ic_launcher_round.png"
+          done
+
+      - name: Preparar payload do jogo
+        run: |
+          mkdir -p ludere/autogen/input
+
+          test -f SuperBomberman5_Autogen_Payload.zip
+
+          cp SuperBomberman5_Autogen_Payload.zip \
+            ludere/autogen/input/payload.zip
+
+          unzip -o ludere/autogen/input/payload.zip \
+            -d ludere/autogen/input/
+
+          rm ludere/autogen/input/payload.zip
+
+      - name: Gerar APKs
         working-directory: ludere
         run: |
           chmod +x ./autogen/generate
           ./autogen/generate
 
-      - name: Upload build output
+      - name: Publicar somente o APK universal
         uses: actions/upload-artifact@v4
         with:
-          name: SuperBomberman5-output
-          path: ludere/autogen/output/
+          name: SuperBomberman5-APK-Universal
+          path: ludere/autogen/output/universal/*.apk
           if-no-files-found: error
           retention-days: 7

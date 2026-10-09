@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Fazer checkout do repositorio com o payload
+      - name: Fazer checkout do repositorio do jogo
         uses: actions/checkout@v4
 
       - name: Baixar meu fork do Ludere
@@ -25,16 +25,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xmlstarlet imagemagick
 
-      - name: Aplicar icon.png ao aplicativo
+      - name: Corrigir e aplicar icon.png
         run: |
+          set -e
+
           RES="ludere/app/src/main/res"
           ICON="$RES/mipmap-xxxhdpi/icon.png"
+          TEMP="/tmp/ludere-icon.png"
 
           if [ ! -f "$ICON" ]; then
             echo "ERRO: icon.png nao encontrado em $ICON"
             exit 1
           fi
 
+          echo "Formato original do arquivo:"
+          file "$ICON"
+
+          # Converter a imagem para PNG verdadeiro.
+          convert "$ICON" -strip "PNG32:$TEMP"
+
+          # Confirmar que a conversao gerou um PNG valido.
+          identify "$TEMP"
+          test "$(od -An -tx1 -N8 "$TEMP" | tr -d ' \n')" = "89504e470d0a1a0a"
+
+          # Criar os icones nas resolucoes Android.
           for item in \
             "mipmap-mdpi 48" \
             "mipmap-hdpi 72" \
@@ -51,37 +65,76 @@ jobs:
               exit 1
             fi
 
-            convert "$ICON" -resize "${SIZE}x${SIZE}!" \
+            convert "$TEMP" \
+              -resize "${SIZE}x${SIZE}" \
               "$DIR/ic_launcher.png"
 
-            convert "$ICON" -resize "${SIZE}x${SIZE}!" \
+            convert "$TEMP" \
+              -resize "${SIZE}x${SIZE}" \
               "$DIR/ic_launcher_round.png"
           done
 
+          # Remover o arquivo de origem invalido dos recursos Android.
+          rm "$ICON"
+
+          echo "Icones criados com sucesso."
+
       - name: Preparar payload do jogo
         run: |
+          set -e
+
+          PAYLOAD="SuperBomberman5_Autogen_Payload.zip"
+
+          if [ ! -f "$PAYLOAD" ]; then
+            echo "ERRO: payload nao encontrado: $PAYLOAD"
+            exit 1
+          fi
+
           mkdir -p ludere/autogen/input
 
-          test -f SuperBomberman5_Autogen_Payload.zip
-
-          cp SuperBomberman5_Autogen_Payload.zip \
-            ludere/autogen/input/payload.zip
+          cp "$PAYLOAD" ludere/autogen/input/payload.zip
 
           unzip -o ludere/autogen/input/payload.zip \
             -d ludere/autogen/input/
 
           rm ludere/autogen/input/payload.zip
 
-      - name: Gerar APKs
+      - name: Gerar APKs do jogo
         working-directory: ludere
         run: |
+          set -e
           chmod +x ./autogen/generate
           ./autogen/generate
 
-      - name: Publicar somente o APK universal
+      - name: Localizar APK universal
+        id: apk
+        run: |
+          set -e
+
+          echo "Arquivos APK gerados:"
+          find ludere -type f -name "*.apk" -print
+
+          APK="$(find ludere -type f \
+            -name "*universal*.apk" \
+            -path "*/outputs/apk/*" \
+            -print -quit)"
+
+          if [ -z "$APK" ]; then
+            echo "ERRO: APK universal nao encontrado."
+            echo "Confira os caminhos listados acima."
+            exit 1
+          fi
+
+          mkdir -p release
+          cp "$APK" release/SuperBomberman5-Universal.apk
+
+          echo "apk_path=release/SuperBomberman5-Universal.apk" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Publicar APK universal
         uses: actions/upload-artifact@v4
         with:
           name: SuperBomberman5-APK-Universal
-          path: ludere/autogen/output/universal/*.apk
+          path: release/SuperBomberman5-Universal.apk
           if-no-files-found: error
           retention-days: 7

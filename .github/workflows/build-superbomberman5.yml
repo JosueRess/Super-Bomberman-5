@@ -17,67 +17,15 @@ jobs:
 
       - name: Baixar meu fork do Ludere
         run: |
+          set -e
           git clone --depth 1 \
             https://github.com/JosueRess/Ludere.git ludere
 
       - name: Instalar dependencias
         run: |
+          set -e
           sudo apt-get update
           sudo apt-get install -y xmlstarlet imagemagick
-
-      - name: Corrigir e aplicar icon.png
-        run: |
-          set -e
-
-          RES="ludere/app/src/main/res"
-          ICON="$RES/mipmap-xxxhdpi/icon.png"
-          TEMP="/tmp/ludere-icon.png"
-
-          if [ ! -f "$ICON" ]; then
-            echo "ERRO: icon.png nao encontrado em $ICON"
-            exit 1
-          fi
-
-          echo "Formato original do arquivo:"
-          file "$ICON"
-
-          # Converter a imagem para PNG verdadeiro.
-          convert "$ICON" -strip "PNG32:$TEMP"
-
-          # Confirmar que a conversao gerou um PNG valido.
-          identify "$TEMP"
-          test "$(od -An -tx1 -N8 "$TEMP" | tr -d ' \n')" = "89504e470d0a1a0a"
-
-          # Criar os icones nas resolucoes Android.
-          for item in \
-            "mipmap-mdpi 48" \
-            "mipmap-hdpi 72" \
-            "mipmap-xhdpi 96" \
-            "mipmap-xxhdpi 144" \
-            "mipmap-xxxhdpi 192"
-          do
-            set -- $item
-            DIR="$RES/$1"
-            SIZE="$2"
-
-            if [ ! -d "$DIR" ]; then
-              echo "ERRO: pasta nao encontrada: $DIR"
-              exit 1
-            fi
-
-            convert "$TEMP" \
-              -resize "${SIZE}x${SIZE}" \
-              "$DIR/ic_launcher.png"
-
-            convert "$TEMP" \
-              -resize "${SIZE}x${SIZE}" \
-              "$DIR/ic_launcher_round.png"
-          done
-
-          # Remover o arquivo de origem invalido dos recursos Android.
-          rm "$ICON"
-
-          echo "Icones criados com sucesso."
 
       - name: Preparar payload do jogo
         run: |
@@ -87,6 +35,8 @@ jobs:
 
           if [ ! -f "$PAYLOAD" ]; then
             echo "ERRO: payload nao encontrado: $PAYLOAD"
+            echo "Arquivos na raiz:"
+            ls -la
             exit 1
           fi
 
@@ -99,6 +49,125 @@ jobs:
 
           rm ludere/autogen/input/payload.zip
 
+      - name: Aplicar icone personalizado
+        run: |
+          set -e
+
+          RES="ludere/app/src/main/res"
+          TEMP="/tmp/ludere-icon.png"
+
+          # Primeiro, procurar icon.png no repositorio do jogo.
+          ICON="$(find . \
+            -path './.git' -prune -o \
+            -path './ludere' -prune -o \
+            -type f -iname 'icon.png' -print -quit)"
+
+          # Se nao encontrar, procurar no fork do Ludere.
+          if [ -z "$ICON" ]; then
+            ICON="$(find ludere/app/src/main/res \
+              -type f -iname 'icon.png' -print -quit)"
+          fi
+
+          if [ -z "$ICON" ] || [ ! -f "$ICON" ]; then
+            echo "ERRO: nao encontrei icon.png."
+            echo "Coloque icon.png no repositorio do jogo."
+            exit 1
+          fi
+
+          echo "Imagem encontrada: $ICON"
+          file "$ICON"
+
+          # Converter para PNG verdadeiro.
+          convert "$ICON" -strip "PNG32:$TEMP"
+          identify "$TEMP"
+
+          # Confirmar a assinatura PNG.
+          SIGNATURE="$(od -An -tx1 -N8 "$TEMP" | tr -d ' \n')"
+
+          if [ "$SIGNATURE" != "89504e470d0a1a0a" ]; then
+            echo "ERRO: a imagem convertida nao e um PNG valido."
+            exit 1
+          fi
+
+          # Criar os icones em cada densidade Android.
+          for item in \
+            "mipmap-mdpi 48" \
+            "mipmap-hdpi 72" \
+            "mipmap-xhdpi 96" \
+            "mipmap-xxhdpi 144" \
+            "mipmap-xxxhdpi 192"
+          do
+            set -- $item
+            DIR="$RES/$1"
+            SIZE="$2"
+
+            if [ ! -d "$DIR" ]; then
+              echo "ERRO: pasta inexistente: $DIR"
+              exit 1
+            fi
+
+            convert "$TEMP" \
+              -resize "${SIZE}x${SIZE}" \
+              "$DIR/ic_launcher.png"
+
+            convert "$TEMP" \
+              -resize "${SIZE}x${SIZE}" \
+              "$DIR/ic_launcher_round.png"
+          done
+
+          # Garantir que o Manifest use os icones PNG criados.
+          MANIFEST="ludere/app/src/main/AndroidManifest.xml"
+
+          if [ ! -f "$MANIFEST" ]; then
+            echo "ERRO: AndroidManifest.xml nao encontrado."
+            exit 1
+          fi
+
+          python3 - "$MANIFEST" <<'PY'
+          import re
+          import sys
+
+          path = sys.argv[1]
+
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          content, icon_count = re.subn(
+              r'android:icon="[^"]+"',
+              'android:icon="@mipmap/ic_launcher"',
+              content
+          )
+
+          content, round_count = re.subn(
+              r'android:roundIcon="[^"]+"',
+              'android:roundIcon="@mipmap/ic_launcher_round"',
+              content
+          )
+
+          if icon_count == 0:
+              raise SystemExit("ERRO: android:icon nao encontrado no Manifest.")
+
+          if round_count == 0:
+              print("Aviso: android:roundIcon nao existia no Manifest.")
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(content)
+
+          print("Manifest atualizado.")
+          PY
+
+          # Remover definicoes adaptativas que poderiam sobrepor os PNGs.
+          rm -f "$RES/mipmap-anydpi-v26/ic_launcher.xml"
+          rm -f "$RES/mipmap-anydpi-v26/ic_launcher_round.xml"
+
+          echo "Recursos de icone:"
+          find "$RES" -iname '*ic_launcher*' -print
+
+          echo "Configuracao do Manifest:"
+          grep -nE 'android:(icon|roundIcon)=' "$MANIFEST"
+
+          echo "Icone personalizado preparado."
+
       - name: Gerar APKs do jogo
         working-directory: ludere
         run: |
@@ -107,17 +176,27 @@ jobs:
           ./autogen/generate
 
       - name: Localizar APK universal
-        id: apk
         run: |
           set -e
 
-          echo "Arquivos APK gerados:"
-          find ludere -type f -name "*.apk" -print
+          echo "Arquivos APK encontrados:"
+          find ludere/autogen/output \
+            ludere/app/build/outputs/apk \
+            -type f -name '*.apk' -print 2>/dev/null || true
 
-          APK="$(find ludere -type f \
-            -name "*universal*.apk" \
-            -path "*/outputs/apk/*" \
-            -print -quit)"
+          APK=""
+
+          if [ -d ludere/autogen/output ]; then
+            APK="$(find ludere/autogen/output \
+              -type f -iname '*universal*.apk' \
+              -print -quit)"
+          fi
+
+          if [ -z "$APK" ] && [ -d ludere/app/build/outputs/apk ]; then
+            APK="$(find ludere/app/build/outputs/apk \
+              -type f -iname '*universal*.apk' \
+              -print -quit)"
+          fi
 
           if [ -z "$APK" ]; then
             echo "ERRO: APK universal nao encontrado."
@@ -128,8 +207,8 @@ jobs:
           mkdir -p release
           cp "$APK" release/SuperBomberman5-Universal.apk
 
-          echo "apk_path=release/SuperBomberman5-Universal.apk" \
-            >> "$GITHUB_OUTPUT"
+          echo "APK selecionado: $APK"
+          ls -lh release/SuperBomberman5-Universal.apk
 
       - name: Publicar APK universal
         uses: actions/upload-artifact@v4

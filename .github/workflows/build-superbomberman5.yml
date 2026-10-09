@@ -11,10 +11,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Fazer checkout do repositorio do jogo
+      - name: Fazer checkout do repositorio
         uses: actions/checkout@v4
 
-      - name: Baixar meu fork do Ludere
+      - name: Baixar fork do Ludere
         run: |
           set -e
           git clone --depth 1 \
@@ -24,7 +24,8 @@ jobs:
         run: |
           set -e
           sudo apt-get update
-          sudo apt-get install -y imagemagick file unzip
+          sudo apt-get install -y \
+            xmlstarlet imagemagick unzip file python3
 
       - name: Preparar payload do jogo
         run: |
@@ -39,6 +40,7 @@ jobs:
           fi
 
           mkdir -p ludere/autogen/input
+
           cp "$PAYLOAD" ludere/autogen/input/payload.zip
 
           unzip -o ludere/autogen/input/payload.zip \
@@ -46,53 +48,114 @@ jobs:
 
           rm -f ludere/autogen/input/payload.zip
 
-      - name: Preparar e validar icone
+          echo "Conteudo da pasta input:"
+          find ludere/autogen/input -maxdepth 3 -type f -print
+
+      - name: Corrigir gerador do Ludere
+        run: |
+          set -e
+
+          GENERATOR="ludere/autogen/generate"
+
+          if [ ! -f "$GENERATOR" ]; then
+            echo "ERRO: autogen/generate nao encontrado."
+            exit 1
+          fi
+
+          python3 - "$GENERATOR" <<'PY'
+          import re
+          import sys
+
+          path = sys.argv[1]
+
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          # Interrompe a execucao se uma compilacao falhar.
+          if not content.startswith("#!/usr/bin/env bash\n"):
+              raise SystemExit(
+                  "ERRO: cabecalho inesperado em autogen/generate."
+              )
+
+          if "set -e" not in content.splitlines()[:5]:
+              content = content.replace(
+                  "#!/usr/bin/env bash\n",
+                  "#!/usr/bin/env bash\nset -e\n",
+                  1
+              )
+
+          # Em vez de ignorar IDs que nao comecam com letra,
+          # adiciona um prefixo valido.
+          pattern = (
+              r'if \[\[ ! "\$romid" =~ \^\[a-z\] \]\]'
+              r'\s*then\s*'
+              r'err "\$romid must start with a letter! Skipping\.\.\."'
+              r'\s*continue\s*fi'
+          )
+
+          replacement = '''if [[ ! "$romid" =~ ^[a-z] ]]
+          then
+              log "Adicionando prefixo game_ ao ID: $romid"
+              romid="game_${romid}"
+          fi'''
+
+          content, count = re.subn(
+              pattern, replacement, content, count=1
+          )
+
+          if count != 1:
+              raise SystemExit(
+                  "ERRO: nao encontrei o bloco esperado para corrigir "
+                  "o ROM ID. O gerador pode ter mudado."
+              )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(content)
+
+          print("Gerador corrigido.")
+          PY
+
+          chmod +x "$GENERATOR"
+
+      - name: Preparar icone personalizado
         run: |
           set -e
 
           RES="ludere/app/src/main/res"
           TEMP="/tmp/superbomberman-icon.png"
 
-          # Procurar icon.png no repositorio principal.
           ICON="$(find . \
             -path './.git' -prune -o \
             -path './ludere' -prune -o \
             -type f -iname 'icon.png' -print -quit)"
 
-          # Se nao existir, procurar no fork do Ludere.
           if [ -z "$ICON" ]; then
-            ICON="$(find ludere/app/src/main/res \
-              -type f -iname 'icon.png' -print -quit)"
+            ICON="$(find "$RES" -type f \
+              -iname 'icon.png' -print -quit)"
           fi
 
           if [ -z "$ICON" ] || [ ! -f "$ICON" ]; then
             echo "ERRO: icon.png nao encontrado."
-            echo "Coloque o arquivo icon.png na raiz do repositorio principal."
+            echo "Coloque icon.png na raiz do repositorio principal."
             exit 1
           fi
 
-          echo "Icone encontrado: $ICON"
+          echo "Imagem original: $ICON"
           file "$ICON"
 
-          # Converter a imagem original em PNG real.
           convert "$ICON" \
             -background none \
             -alpha on \
             -strip \
-            PNG32:"$TEMP"
+            "PNG32:$TEMP"
 
-          # Verificar a assinatura PNG.
           SIGNATURE="$(od -An -tx1 -N8 "$TEMP" | tr -d ' \n')"
 
           if [ "$SIGNATURE" != "89504e470d0a1a0a" ]; then
-            echo "ERRO: nao foi possivel gerar um PNG valido."
+            echo "ERRO: a imagem convertida nao e PNG valido."
             exit 1
           fi
 
-          file "$TEMP"
-          identify "$TEMP"
-
-          # Atualizar os icones utilizados pelo Manifest.
           for ITEM in \
             "mipmap-mdpi 48" \
             "mipmap-hdpi 72" \
@@ -106,34 +169,29 @@ jobs:
 
             mkdir -p "$DIR"
 
-            convert "$TEMP" \
-              -resize "${SIZE}x${SIZE}" \
+            convert "$TEMP" -resize "${SIZE}x${SIZE}" \
               "$DIR/ic_launcher.png"
 
-            convert "$TEMP" \
-              -resize "${SIZE}x${SIZE}" \
+            convert "$TEMP" -resize "${SIZE}x${SIZE}" \
               "$DIR/ic_launcher_round.png"
           done
 
-          # Corrigir tambem o arquivo que aparece no erro do AAPT.
+          # Corrige tambem o arquivo que causou o erro do AAPT.
           mkdir -p "$RES/mipmap-xxxhdpi"
 
-          convert "$TEMP" \
-            -resize "192x192" \
+          convert "$TEMP" -resize 192x192 \
             "$RES/mipmap-xxxhdpi/icon.png"
 
-          # Validar especificamente o arquivo que falhou.
           file "$RES/mipmap-xxxhdpi/icon.png"
 
-          ICON_SIGNATURE="$(od -An -tx1 -N8 \
+          SIGNATURE="$(od -An -tx1 -N8 \
             "$RES/mipmap-xxxhdpi/icon.png" | tr -d ' \n')"
 
-          if [ "$ICON_SIGNATURE" != "89504e470d0a1a0a" ]; then
-            echo "ERRO: icon.png continua invalido."
+          if [ "$SIGNATURE" != "89504e470d0a1a0a" ]; then
+            echo "ERRO: icon.png invalido."
             exit 1
           fi
 
-          # Configurar os icones no Manifest.
           MANIFEST="ludere/app/src/main/AndroidManifest.xml"
 
           if [ ! -f "$MANIFEST" ]; then
@@ -150,11 +208,16 @@ jobs:
           with open(path, "r", encoding="utf-8") as f:
               content = f.read()
 
-          content, icon_count = re.subn(
+          content, count = re.subn(
               r'android:icon="[^"]+"',
               'android:icon="@mipmap/ic_launcher"',
               content
           )
+
+          if count == 0:
+              raise SystemExit(
+                  "ERRO: android:icon nao encontrado no Manifest."
+              )
 
           content, round_count = re.subn(
               r'android:roundIcon="[^"]+"',
@@ -162,15 +225,8 @@ jobs:
               content
           )
 
-          if icon_count == 0:
-              raise SystemExit(
-                  "ERRO: android:icon nao encontrado no Manifest."
-              )
-
           if round_count == 0:
-              print(
-                  "Aviso: android:roundIcon nao existia no Manifest."
-              )
+              print("Aviso: roundIcon nao encontrado.")
 
           with open(path, "w", encoding="utf-8") as f:
               f.write(content)
@@ -178,51 +234,47 @@ jobs:
           print("Manifest atualizado.")
           PY
 
-          # Remover icones adaptativos que poderiam substituir
-          # os PNGs tradicionais.
+          # Remover icones adaptativos que possam substituir os PNGs.
           rm -f "$RES/mipmap-anydpi-v26/ic_launcher.xml"
           rm -f "$RES/mipmap-anydpi-v26/ic_launcher_round.xml"
 
-          echo "Icones preparados:"
-          find "$RES" -iname '*ic_launcher*' -o -name 'icon.png'
+          echo "Icone preparado com sucesso."
 
-          echo "Manifest:"
-          grep -nE 'android:(icon|roundIcon)=' "$MANIFEST"
-
-      - name: Executar gerador do Ludere
+      - name: Gerar APKs
         working-directory: ludere
         run: |
           set -e
-          chmod +x ./autogen/generate
           ./autogen/generate
 
       - name: Localizar APK universal
-        if: success()
         run: |
           set -e
 
-          echo "APK encontrados:"
-          find ludere -type f -name '*.apk' -print
+          echo "Arquivos APK gerados:"
+          find ludere/autogen/output -type f -name '*.apk' -print
 
+          APK_DIR="ludere/autogen/output/universal"
           APK=""
 
-          APK="$(find ludere -type f \
-            -iname '*universal*.apk' -print -quit)"
+          if [ -d "$APK_DIR" ]; then
+            APK="$(find "$APK_DIR" -type f \
+              -name '*.apk' -print -quit)"
+          fi
 
           if [ -z "$APK" ]; then
-            echo "ERRO: o gerador nao produziu APK universal."
-            echo "Verifique os APKs e os logs da etapa anterior."
+            echo "ERRO: nenhum APK encontrado na pasta universal."
+            echo "Verifique os logs da etapa Gerar APKs."
             exit 1
           fi
 
           mkdir -p release
+
           cp "$APK" release/SuperBomberman5-Universal.apk
 
-          echo "APK selecionado: $APK"
+          echo "APK escolhido: $APK"
           ls -lh release/SuperBomberman5-Universal.apk
 
       - name: Publicar APK universal
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: SuperBomberman5-APK-Universal
